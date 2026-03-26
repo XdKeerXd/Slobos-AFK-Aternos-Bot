@@ -14,8 +14,10 @@ const http = require("http");
 const https = require("https");
 const { Server } = require("socket.io");
 const inventoryViewer = require("mineflayer-web-inventory");
+const autofish = require("mineflayer-autofish");
 const fs = require("fs");
 const path = require("path");
+const vec3 = require("vec3");
 
 // ============================================================
 // EXPRESS SERVER - Keep Render/Aternos alive
@@ -32,6 +34,8 @@ let botState = {
   startTime: Date.now(),
   errors: [],
   wasThrottled: false,
+  isFarming: false,
+  isFishing: false,
 };
 
 // Health check endpoint for monitoring
@@ -267,7 +271,10 @@ app.get('/', (req, res) => {
               { path: 'combat.attack-mobs', label: 'Attack Mobs' },
               { path: 'combat.auto-eat', label: 'Auto Eat' },
               { path: 'utils.anti-afk.enabled', label: 'Anti-AFK' },
-              { path: 'inventory-management.auto-drop', label: 'Auto Drop Trash' }
+              { path: 'inventory-management.auto-drop', label: 'Auto Drop Trash' },
+              { path: 'fishing.enabled', label: 'Auto Fishing' },
+              { path: 'farming.enabled', label: 'Auto Farming' },
+              { path: 'freewill.enabled', label: 'Freewill Mode (!freedom)' }
             ];
 
             toggles.forEach(t => {
@@ -1135,6 +1142,19 @@ io.on('connection', (socket) => {
       fs.writeFileSync(path.join(__dirname, 'settings.json'), JSON.stringify(config, null, 2));
       addLog(`[Settings] Updated from dashboard: ${JSON.stringify(data)}`);
       io.emit('settingsUpdated', config);
+
+      // REACTIVITY: Start/Stop modules immediately if toggled
+      if (bot && botState.connected) {
+        if (data.fishing && data.fishing.enabled) startFishing(bot);
+        if (data.farming && data.farming.enabled) {
+           const mcData = require("minecraft-data")(bot.version);
+           startFarming(bot, mcData, new Movements(bot, mcData));
+        }
+        if (data.freewill && data.freewill.enabled) {
+           const mcData = require("minecraft-data")(bot.version);
+           startFreewill(bot, mcData, new Movements(bot, mcData));
+        }
+      }
       
       // Notify client
       socket.emit('updateResult', { success: true });
@@ -1269,14 +1289,18 @@ function getReconnectDelay() {
     return throttleDelay;
   }
 
-  // FIX: read auto-reconnect-delay from settings as base delay
-  const baseDelay = config.utils["auto-reconnect-delay"] || 3000;
-  const maxDelay = config.utils["max-reconnect-delay"] || 30000;
+  // If the last error was socketClosed, double the delay to avoid spamming Aternos
+  const lastError = botState.errors.length > 0 ? botState.errors[botState.errors.length - 1] : null;
+  const isSocketClosed = lastError && lastError.reason === "socketClosed";
+  
+  const baseDelay = isSocketClosed ? 10000 : (config.utils["auto-reconnect-delay"] || 3000);
+  const maxDelay = config.utils["max-reconnect-delay"] || 60000;
+  
   const delay = Math.min(
     baseDelay * Math.pow(2, botState.reconnectAttempts),
     maxDelay,
   );
-  const jitter = Math.floor(Math.random() * 2000);
+  const jitter = Math.floor(Math.random() * 5000); // More jitter for Aternos
   return delay + jitter;
 }
 
@@ -1320,6 +1344,7 @@ function createBot() {
     });
 
     bot.loadPlugin(pathfinder);
+    bot.loadPlugin(autofish);
 
     // FIX: connection timeout - end the old bot before reconnecting to avoid ghost bots
     clearBotTimeouts();
@@ -1437,12 +1462,18 @@ function createBot() {
       // NOTE: do NOT call scheduleReconnect() here - 'end' will fire right after 'kicked' and handle it
     });
 
-    // FIX: 'end' is the single reconnect trigger
     bot.on("end", (reason) => {
-      addLog(`[Bot] Disconnected: ${reason || "Unknown reason"}`);
+      const reasonStr = reason || "socketClosed"; // Mineflayer often returns null for socketClosed
+      addLog(`[Bot] Disconnected: ${reasonStr}`);
       botState.connected = false;
       clearAllIntervals();
-      spawnHandled = false; // reset for next connection
+      spawnHandled = false; 
+
+      botState.errors.push({
+        type: "disconnect",
+        reason: reasonStr,
+        time: Date.now(),
+      });
 
       if (
         config.discord &&
@@ -1769,6 +1800,17 @@ function initializeModules(bot, mcData, defaultMove) {
     chatModule(bot);
   }
 
+  // ---------- FARMING & FISHING ----------
+  if (config.fishing && config.fishing.enabled) {
+    startFishing(bot);
+  }
+  if (config.farming && config.farming.enabled) {
+    startFarming(bot, mcData, defaultMove);
+  }
+  if (config.freewill && config.freewill.enabled) {
+    startFreewill(bot, mcData, defaultMove);
+  }
+
   addLog("[Modules] All modules initialized!");
 }
 
@@ -1993,14 +2035,108 @@ function bedModule(bot, mcData) {
   }, 10000);
 }
 
+// Fishing module
+function startFishing(bot) {
+  if (botState.isFishing) return;
+  botState.isFishing = true;
+  
+  addLog("[Fishing] Starting Auto-Fisher...");
+  const rod = bot.inventory.items().find(i => i.name.includes('fishing_rod'));
+  if (rod) {
+    bot.equip(rod, 'hand').then(() => {
+      bot.autofish.start();
+    }).catch(e => addLog("[Fishing] Error: " + e.message));
+  } else {
+    addLog("[Fishing] No fishing rod found in inventory!");
+  }
+}
+
+// Farming module (Continuous loop)
+async function startFarming(bot, mcData, defaultMove) {
+  if (!config.farming || !config.farming.enabled) return;
+  
+  // Prevent multiple farming loops
+  if (botState.isFarming) return;
+  botState.isFarming = true;
+
+  const farmLoop = async () => {
+    if (!bot || !botState.connected || !config.farming.enabled) {
+      botState.isFarming = false;
+      return;
+    }
+
+    const blocks = bot.findBlocks({
+      matching: (block) => {
+        if (!config.farming.plants.includes(block.name)) return false;
+        return block.metadata === 7;
+      },
+      maxDistance: config.farming.radius || 16,
+      count: 1
+    });
+
+    if (blocks.length > 0) {
+      try {
+        const target = bot.blockAt(blocks[0]);
+        bot.pathfinder.setMovements(defaultMove);
+        await bot.pathfinder.goto(new GoalBlock(target.position.x, target.position.y, target.position.z));
+        
+        addLog(`[Farming] Harvesting \${target.name}...`);
+        await bot.dig(target);
+        
+        const seedName = target.name === 'wheat' ? 'wheat_seeds' : target.name;
+        const seeds = bot.inventory.items().find(i => i.name.includes(seedName));
+        if (seeds) {
+          await bot.equip(seeds, 'hand');
+          const dirt = bot.blockAt(target.position.offset(0, -1, 0));
+          await bot.placeBlock(dirt, new vec3(0, 1, 0));
+        }
+      } catch (e) {
+        addLog("[Farming] Error: " + e.message);
+      }
+    }
+    
+    // Check again in 10 seconds
+    setTimeout(farmLoop, 10000);
+  };
+
+  farmLoop();
+}
+
+// Freewill (!freedom) module
+function startFreewill(bot, mcData, defaultMove) {
+  addLog("[Freewill] Bot is now free to choose its path.");
+  
+  const tasks = ['fish', 'farm', 'afk'];
+  addInterval(async () => {
+    if (!bot || !botState.connected) return;
+    const task = tasks[Math.floor(Math.random() * tasks.length)];
+    addLog(`[Freewill] Choosing new task: \${task}`);
+    
+    if (task === 'fish') startFishing(bot);
+    else if (task === 'farm') await startFarming(bot, mcData, defaultMove);
+    else addLog("[Freewill] Decided to just stay AFK for a bit.");
+    
+  }, config.freewill["cycle-interval"] || 1800000);
+}
+
 // Chat module
-// FIX: wire up discord.events.chat flag
 function chatModule(bot) {
   bot.on("chat", (username, message) => {
     if (!bot || username === bot.username) return;
 
     try {
-      // FIX: send chat events to Discord if enabled
+      const lowerMsg = message.toLowerCase();
+      
+      if (lowerMsg === "!freedom") {
+        config.freewill.enabled = !config.freewill.enabled;
+        addLog(`[Freewill] Toggled by \${username}: \${config.freewill.enabled}`);
+        bot.chat(`Freewill mode is now \${config.freewill.enabled ? 'ON' : 'OFF'}`);
+        if (config.freewill.enabled) {
+          const mcData = require("minecraft-data")(bot.version);
+          startFreewill(bot, mcData, new Movements(bot, mcData));
+        }
+      }
+
       if (
         config.discord &&
         config.discord.enabled &&

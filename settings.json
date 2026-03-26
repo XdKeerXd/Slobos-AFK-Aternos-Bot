@@ -86,6 +86,18 @@
     "auto-drop-interval": 300000,
     "trash-items": ["rotten_flesh", "bone", "spider_eye", "arrow", "string", "dirt", "cobblestone"]
   },
+  "farming": {
+    "enabled": false,
+    "radius": 16,
+    "plants": ["wheat", "carrots", "potatoes", "beetroots"]
+  },
+  "fishing": {
+    "enabled": false
+  },
+  "freewill": {
+    "enabled": false,
+    "cycle-interval": 1800000
+  },
   "chat": {
     "respond": true
   }
