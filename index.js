@@ -2137,6 +2137,27 @@ function chatModule(bot) {
         }
       }
 
+      if (lowerMsg === "!fish") {
+        config.fishing.enabled = !config.fishing.enabled;
+        bot.chat(`Fishing is now \${config.fishing.enabled ? 'ON' : 'OFF'}`);
+        if (config.fishing.enabled) startFishing(bot);
+        else {
+          bot.autofish.stop();
+          botState.isFishing = false;
+        }
+      }
+
+      if (lowerMsg === "!farm") {
+        config.farming.enabled = !config.farming.enabled;
+        bot.chat(`Farming is now \${config.farming.enabled ? 'ON' : 'OFF'}`);
+        if (config.farming.enabled) {
+           const mcData = require("minecraft-data")(bot.version);
+           startFarming(bot, mcData, new Movements(bot, mcData));
+        } else {
+           botState.isFarming = false;
+        }
+      }
+
       if (
         config.discord &&
         config.discord.enabled &&
