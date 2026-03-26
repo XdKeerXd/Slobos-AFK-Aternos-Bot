@@ -1,6 +1,10 @@
 "use strict";
 
-const { addLog, getLogs } = require("./logger");
+let { addLog: _addLog, getLogs } = require("./logger");
+const addLog = (msg) => {
+  _addLog(msg);
+  if (typeof io !== 'undefined') io.emit('log', msg);
+};
 const mineflayer = require("mineflayer");
 const { Movements, pathfinder, goals } = require("mineflayer-pathfinder");
 const { GoalBlock } = goals;
@@ -8,6 +12,10 @@ const config = require("./settings.json");
 const express = require("express");
 const http = require("http");
 const https = require("https");
+const { Server } = require("socket.io");
+const inventoryViewer = require("mineflayer-web-inventory");
+const fs = require("fs");
+const path = require("path");
 
 // ============================================================
 // EXPRESS SERVER - Keep Render/Aternos alive
@@ -35,6 +43,7 @@ app.get('/', (req, res) => {
         <title>${config.name} Dashboard</title>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
+        <script src="/socket.io/socket.io.js"></script>
         <link rel="stylesheet" media="print" onload="this.media='all'"
               href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
         <style>
@@ -44,221 +53,245 @@ app.get('/', (req, res) => {
             font-family: 'Inter', -apple-system, sans-serif;
             background: #0d1117;
             color: #e6edf3;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
             margin: 0;
             padding: 24px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
           }
 
-          main { width: 100%; max-width: 400px; }
+          main { width: 100%; max-width: 900px; display: grid; grid-template-columns: 1fr 1.5fr; gap: 24px; }
+          @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
 
-          header { margin-bottom: 28px; }
-          header h1 {
-            font-size: 26px;
-            font-weight: 700;
-            color: #f0f6fc;
-            margin: 0;
-            line-height: 1.2;
+          .panel {
+            background: #161b22;
+            border: 1px solid #21262d;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 16px;
           }
-          header p {
-            font-size: 14px;
-            color: #8b949e;
-            margin: 6px 0 0;
-            line-height: 1.5;
+
+          header { grid-column: 1 / -1; margin-bottom: 12px; }
+          header h1 { font-size: 26px; font-weight: 700; color: #f0f6fc; margin: 0; }
+          header p { font-size: 14px; color: #8b949e; margin: 6px 0 0; }
+
+          .tabs { display: flex; gap: 8px; margin-bottom: 16px; grid-column: 1 / -1; }
+          .tab {
+            padding: 8px 16px; border-radius: 6px; background: #21262d; cursor: pointer;
+            font-size: 14px; font-weight: 600; color: #8b949e; transition: 0.2s;
           }
+          .tab.active { background: #238636; color: #fff; }
 
           .status-section {
-            border-radius: 12px;
-            padding: 20px 24px;
-            margin-bottom: 16px;
-            display: flex;
-            align-items: center;
-            gap: 16px;
-            transition: background 0.3s, border-color 0.3s;
+            border-radius: 12px; padding: 16px; margin-bottom: 16px;
+            display: flex; align-items: center; gap: 12px;
           }
           .status-section.online  { background: #0d2218; border: 2px solid #238636; }
           .status-section.offline { background: #200d0d; border: 2px solid #da3633; }
 
           .status-icon {
-            width: 44px; height: 44px;
-            border-radius: 50%;
-            display: flex; align-items: center; justify-content: center;
-            font-size: 20px; flex-shrink: 0;
-            transition: background 0.3s;
+            width: 32px; height: 32px; border-radius: 50%;
+            display: flex; align-items: center; justify-content: center; font-size: 16px;
           }
           .status-icon.online  { background: #238636; }
           .status-icon.offline { background: #da3633; }
 
-          .status-label { font-size: 18px; font-weight: 700; line-height: 1.2; transition: color 0.3s; }
-          .status-label.online  { color: #3fb950; }
-          .status-label.offline { color: #f85149; }
-          .status-detail { font-size: 13px; color: #8b949e; margin-top: 3px; }
+          .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+          .stat-card { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px; }
+          .stat-card dt { font-size: 11px; color: #8b949e; margin-bottom: 4px; }
+          .stat-card dd { font-size: 15px; font-weight: 600; margin: 0; }
 
-          dl { margin: 0; }
-          .stat-card {
-            background: #161b22;
-            border: 1px solid #21262d;
-            border-radius: 10px;
-            padding: 16px 20px;
-            margin-bottom: 10px;
+          .log-body {
+            height: 400px; overflow-y: auto; font-family: monospace; font-size: 12px;
+            background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px;
+            display: flex; flex-direction: column; gap: 2px;
           }
-          dt { font-size: 12px; color: #8b949e; font-weight: 600; margin-bottom: 4px; }
-          dd { margin: 0; font-size: 17px; font-weight: 600; color: #e6edf3; line-height: 1.3; }
-          .stat-detail { margin: 4px 0 0; font-size: 11px; color: #6e7681; }
+          .log-entry { white-space: pre-wrap; word-break: break-all; }
+          .log-entry.error { color: #ff7b72; }
+          .log-entry.warn { color: #d29922; }
+          .log-entry.success { color: #3fb950; }
 
-          .controls { margin-top: 8px; }
-          .btn-grid { display: grid; gap: 10px; margin-bottom: 10px; }
-          .btn-grid-2 { grid-template-columns: 1fr 1fr; }
-
-          .btn-primary {
-            min-height: 52px; border-radius: 10px;
-            font-size: 15px; font-weight: 700;
-            cursor: pointer; letter-spacing: 0.3px;
-            transition: opacity 0.2s, filter 0.2s;
-            font-family: inherit;
+          .console-row { display: flex; gap: 8px; margin-top: 12px; }
+          input {
+            flex: 1; background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+            padding: 8px 12px; color: #e6edf3; font-family: inherit;
           }
-          .btn-primary:hover  { filter: brightness(1.1); }
-          .btn-primary:active { opacity: 0.85; }
-          .btn-start { border: 2px solid #238636; background: #0d2218; color: #3fb950; }
-          .btn-stop  { border: 2px solid #da3633; background: #200d0d; color: #f85149; }
-
-          .btn-secondary {
-            min-height: 44px; border-radius: 10px;
-            border: 1px solid #21262d; background: #161b22; color: #8b949e;
-            font-size: 13px; font-weight: 500;
-            text-decoration: none;
-            display: flex; align-items: center; justify-content: center;
-            font-family: inherit; cursor: pointer;
-            transition: background 0.2s, color 0.2s;
+          button {
+            padding: 8px 16px; border-radius: 6px; border: none; font-weight: 600; cursor: pointer;
           }
-          .btn-secondary:hover { background: #21262d; color: #c9d1d9; }
+          .btn-primary { background: #238636; color: #fff; }
+          .btn-danger { background: #da3633; color: #fff; }
 
-          footer { margin-top: 20px; text-align: center; }
-          footer p { font-size: 12px; color: #484f58; margin: 0; }
+          .settings-grid { display: grid; gap: 12px; }
+          .setting-item { display: flex; justify-content: space-between; align-items: center; }
+          .setting-item label { font-size: 14px; font-weight: 500; }
+          
+          iframe { width: 100%; height: 500px; border: none; border-radius: 12px; background: #161b22; }
+          .hidden { display: none; }
         </style>
       </head>
       <body>
-        <main role="main" aria-label="AFK Bot Dashboard">
+        <header>
+          <h1>AFK Bot Dashboard</h1>
+          <p>Real-time Minecraft Manager</p>
+        </header>
 
-          <header>
-            <h1>AFK Bot Dashboard</h1>
-            <p>Minecraft server bot &middot; Live status</p>
-          </header>
+        <div class="tabs">
+          <div class="tab active" onclick="showTab('main')">Overview</div>
+          <div class="tab" onclick="showTab('inventory')">Inventory</div>
+          <div class="tab" onclick="showTab('settings')">Settings</div>
+        </div>
 
-          <section
-            id="status-section"
-            role="status"
-            aria-live="polite"
-            aria-label="Bot connection status"
-            class="status-section offline"
-          >
-            <div id="status-icon" aria-hidden="true" class="status-icon offline">&#x2717;</div>
-            <div>
-              <div id="status-label" class="status-label offline">Connecting…</div>
-              <div id="status-detail" class="status-detail">Establishing connection</div>
-            </div>
-          </section>
-
-          <section aria-label="Bot statistics">
-            <dl>
-              <div class="stat-card">
-                <dt>Uptime</dt>
-                <dd id="uptime-text">—</dd>
-                <p class="stat-detail">Time since last connection</p>
+        <main>
+          <div id="tab-main" class="tab-content">
+            <div id="status-panel" class="status-section offline">
+              <div id="status-icon" class="status-icon offline">✗</div>
+              <div>
+                <div id="status-label" style="font-weight:700">Disconnected</div>
+                <div id="status-detail" style="font-size:12px; color:#8b949e">Connecting to bot...</div>
               </div>
-              <div class="stat-card">
-                <dt>Coordinates</dt>
-                <dd id="coords-text">Searching…</dd>
-                <p class="stat-detail">Bot's current in-game position</p>
-              </div>
-              <div class="stat-card">
-                <dt>Server address</dt>
-                <dd>${config.server.ip}</dd>
-                <p class="stat-detail">Minecraft server hostname</p>
-              </div>
-            </dl>
-          </section>
-
-          <section class="controls" aria-label="Bot controls">
-            <div class="btn-grid btn-grid-2">
-              <button class="btn-primary btn-start" onclick="startBot()" aria-label="Start bot">Start bot</button>
-              <button class="btn-primary btn-stop" onclick="stopBot()" aria-label="Stop bot">Stop bot</button>
             </div>
-            <div class="btn-grid btn-grid-2">
-              <a href="/tutorial" class="btn-secondary" aria-label="View setup guide">Setup guide</a>
-              <a href="/logs" class="btn-secondary" aria-label="View bot logs">View logs</a>
+
+            <div class="panel">
+              <h3 style="margin-top:0">Statistics</h3>
+              <div class="stat-grid">
+                <div class="stat-card">
+                  <dt>Uptime</dt>
+                  <dd id="uptime-text">0s</dd>
+                </div>
+                <div class="stat-card">
+                  <dt>Position</dt>
+                  <dd id="coords-text">Unknown</dd>
+                </div>
+              </div>
+              <div style="margin-top:16px; display:flex; gap:8px; flex-wrap:wrap">
+                <button class="btn-primary" onclick="botAction('start')">Start Bot</button>
+                <button class="btn-danger" onclick="botAction('stop')">Stop Bot</button>
+                <button style="background:#484f58; color:white" onclick="botAction('shutdown')">Shutdown Server</button>
+              </div>
             </div>
-          </section>
+          </div>
 
-          <footer>
-            <p>Status updates every 5 seconds</p>
-          </footer>
+          <div id="tab-log" class="panel" style="grid-row: span 2">
+            <h3 style="margin-top:0">Logs</h3>
+            <div id="log-body" class="log-body"></div>
+            <div class="console-row">
+              <input id="cmd-input" placeholder="Type a command...">
+              <button class="btn-primary" onclick="sendCmd()">Send</button>
+            </div>
+          </div>
 
+          <div id="tab-inventory" class="tab-content hidden" style="grid-column: 1 / -1">
+             <iframe src="/inventory"></iframe>
+          </div>
+
+          <div id="tab-settings" class="tab-content hidden" style="grid-column: 1 / -1">
+            <div class="panel">
+              <h3>Bot Settings</h3>
+              <div id="settings-container" class="settings-grid">
+                <!-- Settings will be injected here -->
+              </div>
+              <button class="btn-primary" style="margin-top:20px" onclick="saveSettings()">Save Changes</button>
+            </div>
+          </div>
         </main>
 
         <script>
-          function formatUptime(s) {
-            const h = Math.floor(s / 3600);
-            const m = Math.floor((s % 3600) / 60);
-            const sec = s % 60;
-            if (h > 0) return h + 'h ' + m + 'm ' + sec + 's';
-            if (m > 0) return m + 'm ' + sec + 's';
-            return sec + ' seconds';
+          const socket = io();
+          let currentSettings = {};
+
+          function showTab(name) {
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.add('hidden'));
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.getElementById('tab-' + name).classList.remove('hidden');
+            event.target.classList.add('active');
+            if (name === 'settings') renderSettings();
           }
 
-          async function update() {
-            try {
-              const r = await fetch('/health');
-              const data = await r.json();
-              const online = data.status === 'connected';
-
-              const section = document.getElementById('status-section');
-              const icon    = document.getElementById('status-icon');
-              const label   = document.getElementById('status-label');
-              const detail  = document.getElementById('status-detail');
-
-              section.className = 'status-section ' + (online ? 'online' : 'offline');
-              icon.className    = 'status-icon '    + (online ? 'online' : 'offline');
-              icon.textContent  = online ? '✓' : '✗';
-              label.className   = 'status-label '   + (online ? 'online' : 'offline');
-              label.textContent = online ? 'Connected' : 'Disconnected';
-              detail.textContent = online ? 'Bot is active on the server' : 'Attempting to reconnect';
-
-              document.getElementById('uptime-text').textContent = formatUptime(data.uptime);
-
-              if (data.coords) {
-                const x = Math.floor(data.coords.x);
-                const y = Math.floor(data.coords.y);
-                const z = Math.floor(data.coords.z);
-                document.getElementById('coords-text').textContent = 'X ' + x + ', Y ' + y + ', Z ' + z;
-              } else {
-                document.getElementById('coords-text').textContent = 'Searching…';
-              }
-            } catch (e) {
-              const label = document.getElementById('status-label');
-              label.className = 'status-label offline';
-              label.textContent = 'Unreachable';
+          socket.on('statusUpdate', data => {
+            const online = data.status === 'connected';
+            const panel = document.getElementById('status-panel');
+            const icon = document.getElementById('status-icon');
+            const label = document.getElementById('status-label');
+            
+            panel.className = 'status-section ' + (online ? 'online' : 'offline');
+            icon.className = 'status-icon ' + (online ? 'online' : 'offline');
+            icon.textContent = online ? '✓' : '✗';
+            label.textContent = online ? 'Connected' : 'Disconnected';
+            
+            document.getElementById('uptime-text').textContent = data.uptime + 's';
+            if (data.coords) {
+              document.getElementById('coords-text').textContent = Math.floor(data.coords.x) + ', ' + Math.floor(data.coords.y) + ', ' + Math.floor(data.coords.z);
             }
+            if (data.settings) currentSettings = data.settings;
+          });
+
+          socket.on('log', msg => {
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            if (msg.toLowerCase().includes('error')) entry.classList.add('error');
+            if (msg.toLowerCase().includes('warn')) entry.classList.add('warn');
+            if (msg.includes('[+]')) entry.classList.add('success');
+            entry.textContent = msg;
+            const body = document.getElementById('log-body');
+            body.appendChild(entry);
+            body.scrollTop = body.scrollHeight;
+          });
+
+          function sendCmd() {
+            const input = document.getElementById('cmd-input');
+            const cmd = input.value.trim();
+            if (!cmd) return;
+            fetch('/command', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ command: cmd })
+            });
+            input.value = '';
           }
 
-          async function startBot() {
-            const r = await fetch('/start', { method: 'POST' });
-            const data = await r.json();
-            alert(data.success ? 'Bot started!' : data.msg);
-            update();
+          async function botAction(type) {
+             fetch('/' + type, { method: 'POST' });
           }
 
-          async function stopBot() {
-            const r = await fetch('/stop', { method: 'POST' });
-            const data = await r.json();
-            alert(data.success ? 'Bot stopped!' : data.msg);
-            update();
+          function renderSettings() {
+            const container = document.getElementById('settings-container');
+            container.innerHTML = '';
+            
+            // Simplified settings editor for key toggles
+            const toggles = [
+              { path: 'movement.circle-walk.enabled', label: 'Circle Walk' },
+              { path: 'movement.random-jump.enabled', label: 'Random Jump' },
+              { path: 'modules.combat', label: 'Combat Mode' },
+              { path: 'combat.attack-mobs', label: 'Attack Mobs' },
+              { path: 'combat.auto-eat', label: 'Auto Eat' },
+              { path: 'utils.anti-afk.enabled', label: 'Anti-AFK' },
+              { path: 'inventory-management.auto-drop', label: 'Auto Drop Trash' }
+            ];
+
+            toggles.forEach(t => {
+              const div = document.createElement('div');
+              div.className = 'setting-item';
+              const val = t.path.split('.').reduce((o, i) => o[i], currentSettings);
+              div.innerHTML = \`<label>\${t.label}</label><input type="checkbox" data-path="\${t.path}" \${val ? 'checked' : ''}>\`;
+              container.appendChild(div);
+            });
           }
 
-          setInterval(update, 5000);
-          update();
+          function saveSettings() {
+            const updates = {};
+            document.querySelectorAll('#settings-container input').forEach(input => {
+              const path = input.dataset.path.split('.');
+              let obj = updates;
+              for (let i = 0; i < path.length - 1; i++) {
+                if (!obj[path[i]]) obj[path[i]] = {};
+                obj = obj[path[i]];
+              }
+              obj[path[path.length - 1]] = input.checked;
+            });
+            socket.emit('updateSetting', updates);
+          }
         </script>
       </body>
     </html>
@@ -985,6 +1018,13 @@ app.post("/start", (req, res) => {
   res.json({ success: true });
 });
 
+
+app.post("/shutdown", (req, res) => {
+  addLog("[System] Shutdown requested via dashboard");
+  res.json({ success: true, msg: "Server shutting down..." });
+  setTimeout(() => process.exit(0), 1000);
+});
+
 app.post("/stop", (req, res) => {
   if (!botRunning) return res.json({ success: false, msg: "Already stopped" });
 
@@ -1062,8 +1102,64 @@ app.post("/command", express.json(), (req, res) => {
 //============================================================
 
 // FIX: handle port conflict gracefully - try next port if taken
-const server = app.listen(PORT, "0.0.0.0", () => {
-  addLog(`[Server] HTTP server started on port ${server.address().port} `);
+const server = http.createServer(app);
+const io = new Server(server);
+
+// WebSocket event handling
+io.on('connection', (socket) => {
+  addLog(`[Dashboard] New client connected: ${socket.id}`);
+  
+  // Send current state immediately
+  socket.emit('statusUpdate', {
+    status: botState.connected ? "connected" : "disconnected",
+    uptime: Math.floor((Date.now() - botState.startTime) / 1000),
+    coords: bot && bot.entity ? bot.entity.position : null,
+    settings: config
+  });
+
+  socket.on('updateSetting', (data) => {
+    try {
+      // Basic recursive update helper
+      const updateObject = (target, source) => {
+        for (const [key, value] of Object.entries(source)) {
+          if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+            if (!target[key]) target[key] = {};
+            updateObject(target[key], value);
+          } else {
+            target[key] = value;
+          }
+        }
+      };
+      
+      updateObject(config, data);
+      fs.writeFileSync(path.join(__dirname, 'settings.json'), JSON.stringify(config, null, 2));
+      addLog(`[Settings] Updated from dashboard: ${JSON.stringify(data)}`);
+      io.emit('settingsUpdated', config);
+      
+      // Notify client
+      socket.emit('updateResult', { success: true });
+    } catch (err) {
+      addLog(`[Settings] Error updating settings: ${err.message}`);
+      socket.emit('updateResult', { success: false, msg: err.message });
+    }
+  });
+
+  socket.on('disconnect', () => {
+    // Silent disconnect
+  });
+});
+
+// Broadcast logs to all connected clients
+const originalAddLog = require("./logger").addLog;
+const logger = require("./logger");
+// Overriding addLog locally to broadcast via IO
+const broadcastAddLog = (msg) => {
+  originalAddLog(msg);
+  io.emit('log', msg);
+};
+
+server.listen(PORT, "0.0.0.0", () => {
+  addLog(`[Server] Dashboard started on port ${PORT}`);
 });
 server.on("error", (err) => {
   if (err.code === "EADDRINUSE") {
@@ -1149,7 +1245,7 @@ function clearBotTimeouts() {
 
 // FIX: Discord rate limiting - track last send time
 let lastDiscordSend = 0;
-const DISCORD_RATE_LIMIT_MS = 5000; // min 5s between webhook calls
+const DISCORD_RATE_LIMIT_MS = 1000; // min 1s between webhook calls
 
 function clearAllIntervals() {
   addLog(`[Cleanup] Clearing ${activeIntervals.length} intervals`);
@@ -1277,6 +1373,14 @@ function createBot() {
       defaultMove.fallDamageCost = 1000;
 
       initializeModules(bot, mcData, defaultMove);
+      
+      // Initialize Web Inventory
+      try {
+        inventoryViewer(bot, { path: '/inventory', express: app, startOnLoad: true });
+        addLog("[Inventory] Web viewer active at /inventory");
+      } catch (e) {
+        addLog("[Inventory] Error starting viewer: " + e.message);
+      }
 
       // Attempt creative mode (only works if bot has OP and enabled in settings)
       setTimeout(() => {
@@ -1396,6 +1500,45 @@ function scheduleReconnect() {
 // ============================================================
 function initializeModules(bot, mcData, defaultMove) {
   addLog("[Modules] Initializing all modules...");
+
+  // ---------- AUTO-DROP (TRASH CLEANER) ----------
+  if (config["inventory-management"] && config["inventory-management"]["auto-drop"]) {
+    const trashItems = config["inventory-management"]["trash-items"] || [];
+    addInterval(async () => {
+      if (!bot || !botState.connected) return;
+      try {
+        const items = bot.inventory.items();
+        for (const item of items) {
+          if (trashItems.includes(item.name)) {
+            addLog(`[Inventory] Dropping trash: ${item.name}`);
+            await bot.tossStack(item);
+          }
+        }
+      } catch (e) {
+        addLog(`[Inventory] Auto-drop error: ${e.message}`);
+      }
+    }, config["inventory-management"]["auto-drop-interval"] || 300000);
+  }
+
+  // ---------- CAPTCHA SOLVER (BASIC) ----------
+  bot.on('messagestr', (msg) => {
+    const lower = msg.toLowerCase();
+    // Example: "Please type 'xyz' to continue"
+    const typeMatch = msg.match(/type ['"](.+?)['"]/i) || msg.match(/enter ['"](.+?)['"]/i);
+    if (typeMatch && typeMatch[1]) {
+      const code = typeMatch[1];
+      addLog(`[Captcha] Detected type code: ${code}`);
+      setTimeout(() => bot.chat(code), 2000);
+    }
+    
+    // Example: "What is 5 + 3?"
+    const mathMatch = msg.match(/(\d+)\s*\+\s*(\d+)/);
+    if (mathMatch) {
+      const ans = parseInt(mathMatch[1]) + parseInt(mathMatch[2]);
+      addLog(`[Captcha] Detected math: ${mathMatch[0]} = ${ans}`);
+      setTimeout(() => bot.chat(ans.toString()), 2000);
+    }
+  });
 
   // ---------- AUTO AUTH (REACTIVE) ----------
   if (config.utils["auto-auth"] && config.utils["auto-auth"].enabled) {

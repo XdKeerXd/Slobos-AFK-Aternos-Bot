@@ -32,7 +32,7 @@
       "repeat-delay": 120,
       "messages": [
         "I'm a regular player",
-        "Subscribe to Slobos!",
+        "i like kids!",
         "I like to play Minecraft!"
       ]
     },
@@ -73,13 +73,18 @@
     "place-night": false
   },
   "discord": {
-    "enabled": false,
-    "webhookUrl": "YOUR_DISCORD_WEBHOOK_URL_HERE",
+    "enabled": true,
+    "webhookUrl": "https://discord.com/api/webhooks/1486741614301806694/_IIMMxVHZJeI8DeeY_bnrQdqMrHeD3iM2iy2r5txI7C4l0LCWudTeq65UCOzpG7PWh24",
     "events": {
       "connect": true,
       "disconnect": true,
-      "chat": false
+      "chat": true
     }
+  },
+  "inventory-management": {
+    "auto-drop": true,
+    "auto-drop-interval": 300000,
+    "trash-items": ["rotten_flesh", "bone", "spider_eye", "arrow", "string", "dirt", "cobblestone"]
   },
   "chat": {
     "respond": true
