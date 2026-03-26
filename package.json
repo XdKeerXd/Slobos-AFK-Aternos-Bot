@@ -14,7 +14,6 @@
     "minecraft-data": "^3.103.0",
     "mineflayer": "^4.34.0",
     "mineflayer-pathfinder": "^2.1.1",
-    "mineflayer-web-inventory": "^1.4.0",
     "socket.io": "^4.7.2",
     "vec3": "^0.1.8"
   }

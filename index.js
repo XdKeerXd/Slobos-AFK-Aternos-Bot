@@ -13,7 +13,6 @@ const express = require("express");
 const http = require("http");
 const https = require("https");
 const { Server } = require("socket.io");
-const inventoryViewer = require("mineflayer-web-inventory");
 const fs = require("fs");
 const path = require("path");
 const vec3 = require("vec3");
@@ -131,7 +130,13 @@ app.get('/', (req, res) => {
           .setting-item label { font-size: 14px; font-weight: 500; }
           
           iframe { width: 100%; height: 500px; border: none; border-radius: 12px; background: #161b22; }
-          .hidden { display: none; }
+          .item-card { 
+            background: #21262d; border: 1px solid #30363d; border-radius: 8px; 
+            padding: 8px; text-align: center; transition: transform 0.2s;
+          }
+          .item-card:hover { transform: translateY(-2px); border-color: #58a6ff; }
+          .item-name { font-weight: 600; color: #58a6ff; font-size: 10px; margin-bottom: 4px; }
+          .item-count { font-size: 12px; font-weight: 700; color: #f0f6fc; }
         </style>
       </head>
       <body>
@@ -186,7 +191,12 @@ app.get('/', (req, res) => {
           </div>
 
           <div id="tab-inventory" class="tab-content hidden" style="grid-column: 1 / -1">
-             <iframe src="/inventory"></iframe>
+             <div class="panel">
+               <h3>Live Inventory</h3>
+               <div id="inventory-grid" class="inventory-grid">
+                 <!-- Injected via Socket -->
+               </div>
+             </div>
           </div>
 
           <div id="tab-settings" class="tab-content hidden" style="grid-column: 1 / -1">
@@ -228,6 +238,17 @@ app.get('/', (req, res) => {
               document.getElementById('coords-text').textContent = Math.floor(data.coords.x) + ', ' + Math.floor(data.coords.y) + ', ' + Math.floor(data.coords.z);
             }
             if (data.settings) currentSettings = data.settings;
+          });
+
+          socket.on('inventoryUpdate', data => {
+            const grid = document.getElementById('inventory-grid');
+            grid.innerHTML = '';
+            data.items.forEach(item => {
+              const div = document.createElement('div');
+              div.className = 'item-card';
+              div.innerHTML = \`<div class="item-name">\${item.name}</div><div class="item-count">x\${item.count}</div>\`;
+              grid.appendChild(div);
+            });
           });
 
           socket.on('log', msg => {
@@ -1397,13 +1418,29 @@ function createBot() {
 
       initializeModules(bot, mcData, defaultMove);
       
-      // Initialize Web Inventory
-      try {
-        inventoryViewer(bot, { path: '/inventory', express: app, startOnLoad: true });
-        addLog("[Inventory] Web viewer active at /inventory");
-      } catch (e) {
-        addLog("[Inventory] Error starting viewer: " + e.message);
-      }
+      // Custom Inventory Relay via Socket.io
+      const syncInventory = () => {
+        if (!bot || !botState.connected) return;
+        const items = bot.inventory.items().map(item => ({
+          name: item.name,
+          count: item.count,
+          slot: item.slot
+        }));
+        io.emit('inventoryUpdate', { items });
+      };
+      
+      bot.on('playerCollect', syncInventory);
+      bot.on('windowOpen', syncInventory);
+      addInterval(syncInventory, 5000); // Periodic sync
+      
+      // Small spawn move to alert anti-bot systems we are "human"
+      setTimeout(() => {
+        if (bot && botState.connected) {
+          bot.setControlState('jump', true);
+          setTimeout(() => bot.setControlState('jump', false), 200);
+          bot.look(bot.entity.yaw + 0.1, 0);
+        }
+      }, 2000);
 
       // Attempt creative mode (only works if bot has OP and enabled in settings)
       setTimeout(() => {
@@ -1457,7 +1494,9 @@ function createBot() {
       ) {
         sendDiscordWebhook(`[!] **Kicked**: ${kickReason}`, 0xff0000);
       }
-      // NOTE: do NOT call scheduleReconnect() here - 'end' will fire right after 'kicked' and handle it
+      
+      // LOG KICK TO CONSOLE/DASHBOARD TOO
+      addLog(`[System] Bot was kicked. Reason: ${kickReason}`);
     });
 
     bot.on("end", (reason) => {
@@ -1589,31 +1628,24 @@ function initializeModules(bot, mcData, defaultMove) {
     bot.on("messagestr", (message) => {
       if (authHandled) return;
       const msg = message.toLowerCase();
-      if (
-        msg.includes("/register") ||
-        msg.includes("register ") ||
-        msg.includes("지정된 비밀번호")
-      ) {
+      
+      // More robust detection for login/register prompts
+      if (msg.match(/register|create|password|reg/i) && !msg.includes("success")) {
         tryAuth("register");
-      } else if (
-        msg.includes("/login") ||
-        msg.includes("login ") ||
-        msg.includes("로그인")
-      ) {
+      } else if (msg.match(/login|identify|auth/i) && !msg.includes("success")) {
         tryAuth("login");
       }
     });
 
-    // Failsafe: if no prompt after 10s, try login anyway
+    // Smart failsafe: only send if we haven't seen a "Welcome" or "Success" message
     setTimeout(() => {
       if (!authHandled && bot && botState.connected) {
-        addLog(
-          "[Auth] No prompt detected after 10s, sending /login as failsafe",
-        );
-        bot.chat(`/login ${password}`);
+        addLog("[Auth] Failsafe: Attempting login...");
+        const password = config["bot-account"].password || "password123";
+        bot.chat(`/login \${password}`);
         authHandled = true;
       }
-    }, 10000);
+    }, 15000);
   }
 
   // ---------- CHAT MESSAGES ----------
@@ -2143,39 +2175,59 @@ function startFreewill(bot, mcData, defaultMove) {
 // Chat module
 function chatModule(bot) {
   bot.on("chat", (username, message) => {
-    if (!bot || username === bot.username) return;
+    if (!bot || username === bot.username || !botState.connected) return;
 
     try {
       const lowerMsg = message.toLowerCase();
+      const prefix = lowerMsg.startsWith('!') ? '!' : (lowerMsg.startsWith('.') ? '.' : null);
       
-      if (lowerMsg === "!freedom") {
-        config.freewill.enabled = !config.freewill.enabled;
-        addLog(`[Freewill] Toggled by \${username}: \${config.freewill.enabled}`);
-        bot.chat(`Freewill mode is now \${config.freewill.enabled ? 'ON' : 'OFF'}`);
-        if (config.freewill.enabled) {
-          const mcData = require("minecraft-data")(bot.version);
-          startFreewill(bot, mcData, new Movements(bot, mcData));
-        }
-      }
+      if (prefix) {
+        const cmd = lowerMsg.slice(prefix.length); // Slice by prefix length
 
-      if (lowerMsg === "!fish") {
-        config.fishing.enabled = !config.fishing.enabled;
-        bot.chat(`Fishing is now \${config.fishing.enabled ? 'ON' : 'OFF'}`);
-        if (config.fishing.enabled) startFishing(bot);
-        else {
-          bot.activateItem(); // Reel in if fishing
-          botState.isFishing = false;
+        if (cmd === "freedom") {
+          config.freewill.enabled = !config.freewill.enabled;
+          const status = config.freewill.enabled ? 'ON' : 'OFF';
+          addLog(`[Freewill] Toggled by ${username}: ${status}`);
+          bot.chat(`Freewill mode is now ${status}`);
+          if (config.freewill.enabled) {
+            const mcData = require("minecraft-data")(bot.version);
+            startFreewill(bot, mcData, new Movements(bot, mcData));
+          }
         }
-      }
+        
+        if (cmd === "fish") {
+          config.fishing.enabled = !config.fishing.enabled;
+          const status = config.fishing.enabled ? 'ON' : 'OFF';
+          bot.chat(`Fishing is now ${status}`);
+          if (config.fishing.enabled) startFishing(bot);
+          else {
+            bot.activateItem(); 
+            botState.isFishing = false;
+          }
+        }
 
-      if (lowerMsg === "!farm") {
-        config.farming.enabled = !config.farming.enabled;
-        bot.chat(`Farming is now \${config.farming.enabled ? 'ON' : 'OFF'}`);
-        if (config.farming.enabled) {
-           const mcData = require("minecraft-data")(bot.version);
-           startFarming(bot, mcData, new Movements(bot, mcData));
-        } else {
-           botState.isFarming = false;
+        if (cmd === "farm") {
+          config.farming.enabled = !config.farming.enabled;
+          const status = config.farming.enabled ? 'ON' : 'OFF';
+          bot.chat(`Farming is now ${status}`);
+          if (config.farming.enabled) {
+             const mcData = require("minecraft-data")(bot.version);
+             startFarming(bot, mcData, new Movements(bot, mcData));
+          } else {
+             botState.isFarming = false;
+          }
+        }
+        
+        if (cmd.startsWith("tp ")) {
+          const target = cmd.split(" ")[1];
+          if (target) bot.chat(`/tp ${target}`);
+        }
+      } else {
+        // Existing regular chat handling
+        if (config.chat && config.chat.respond) {
+          if (lowerMsg.includes("hello") || lowerMsg.includes("hi")) {
+            bot.chat(`Hello, ${username}!`);
+          }
         }
       }
 
