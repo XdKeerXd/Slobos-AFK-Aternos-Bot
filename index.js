@@ -14,7 +14,6 @@ const http = require("http");
 const https = require("https");
 const { Server } = require("socket.io");
 const inventoryViewer = require("mineflayer-web-inventory");
-const autofish = require("mineflayer-autofish");
 const fs = require("fs");
 const path = require("path");
 const vec3 = require("vec3");
@@ -1344,7 +1343,6 @@ function createBot() {
     });
 
     bot.loadPlugin(pathfinder);
-    bot.loadPlugin(autofish);
 
     // FIX: connection timeout - end the old bot before reconnecting to avoid ghost bots
     clearBotTimeouts();
@@ -2035,20 +2033,43 @@ function bedModule(bot, mcData) {
   }, 10000);
 }
 
-// Fishing module
-function startFishing(bot) {
+// Fishing module (Manual implementation)
+async function startFishing(bot) {
   if (botState.isFishing) return;
   botState.isFishing = true;
   
   addLog("[Fishing] Starting Auto-Fisher...");
-  const rod = bot.inventory.items().find(i => i.name.includes('fishing_rod'));
-  if (rod) {
-    bot.equip(rod, 'hand').then(() => {
-      bot.autofish.start();
-    }).catch(e => addLog("[Fishing] Error: " + e.message));
-  } else {
-    addLog("[Fishing] No fishing rod found in inventory!");
-  }
+  
+  const fishCycle = async () => {
+    if (!bot || !botState.connected || !config.fishing.enabled) {
+      botState.isFishing = false;
+      return;
+    }
+
+    const rod = bot.inventory.items().find(i => i.name.includes('fishing_rod'));
+    if (!rod) {
+      addLog("[Fishing] No fishing rod found in inventory!");
+      botState.isFishing = false;
+      return;
+    }
+
+    try {
+      await bot.equip(rod, 'hand');
+      addLog("[Fishing] Casting line...");
+      await bot.fish(); // Mineflayer's bot.fish() waits for the catch automatically
+      addLog("[Fishing] Fish caught!");
+    } catch (e) {
+      if (e.message !== 'Fishing cancelled') {
+        addLog("[Fishing] Error: " + e.message);
+      }
+    }
+    
+    // Loop
+    if (config.fishing.enabled) setTimeout(fishCycle, 2000);
+    else botState.isFishing = false;
+  };
+
+  fishCycle();
 }
 
 // Farming module (Continuous loop)
@@ -2142,7 +2163,7 @@ function chatModule(bot) {
         bot.chat(`Fishing is now \${config.fishing.enabled ? 'ON' : 'OFF'}`);
         if (config.fishing.enabled) startFishing(bot);
         else {
-          bot.autofish.stop();
+          bot.activateItem(); // Reel in if fishing
           botState.isFishing = false;
         }
       }
